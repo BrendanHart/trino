@@ -116,7 +116,7 @@ public class RawQuery
 
             Descriptor returnedType = new Descriptor(columns.stream()
                     .map(ElasticsearchColumnHandle.class::cast)
-                    .map(column -> new Descriptor.Field(column.getName(), Optional.of(column.getType())))
+                    .map(column -> new Descriptor.Field(column.getQualifiedName(), Optional.of(column.getType())))
                     .collect(toList()));
 
             RawQueryFunctionHandle handle = new RawQueryFunctionHandle(tableHandle);

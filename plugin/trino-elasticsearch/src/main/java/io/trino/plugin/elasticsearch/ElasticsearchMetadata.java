@@ -19,6 +19,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
 import io.airlift.slice.Slice;
 import io.trino.plugin.base.expression.ConnectorExpressions;
+import io.trino.plugin.base.projection.ApplyProjectionUtil;
 import io.trino.plugin.elasticsearch.client.ElasticsearchClient;
 import io.trino.plugin.elasticsearch.client.IndexMetadata;
 import io.trino.plugin.elasticsearch.client.IndexMetadata.DateTimeType;
@@ -41,20 +42,7 @@ import io.trino.plugin.elasticsearch.decoders.VarbinaryDecoder;
 import io.trino.plugin.elasticsearch.decoders.VarcharDecoder;
 import io.trino.plugin.elasticsearch.ptf.RawQuery.RawQueryFunctionHandle;
 import io.trino.spi.TrinoException;
-import io.trino.spi.connector.ColumnHandle;
-import io.trino.spi.connector.ColumnMetadata;
-import io.trino.spi.connector.ConnectorMetadata;
-import io.trino.spi.connector.ConnectorSession;
-import io.trino.spi.connector.ConnectorTableHandle;
-import io.trino.spi.connector.ConnectorTableMetadata;
-import io.trino.spi.connector.ConnectorTableProperties;
-import io.trino.spi.connector.Constraint;
-import io.trino.spi.connector.ConstraintApplicationResult;
-import io.trino.spi.connector.LimitApplicationResult;
-import io.trino.spi.connector.SchemaTableName;
-import io.trino.spi.connector.SchemaTablePrefix;
-import io.trino.spi.connector.TableColumnsMetadata;
-import io.trino.spi.connector.TableFunctionApplicationResult;
+import io.trino.spi.connector.*;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Constant;
@@ -83,12 +71,14 @@ import java.util.stream.IntStream;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verifyNotNull;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterators.singletonIterator;
 import static io.airlift.slice.SliceUtf8.getCodePointAt;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.QUERY;
 import static io.trino.plugin.elasticsearch.ElasticsearchTableHandle.Type.SCAN;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.expression.StandardFunctions.LIKE_FUNCTION_NAME;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -104,6 +94,7 @@ import static java.lang.String.format;
 import static java.util.Collections.emptyIterator;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
+import static java.util.function.UnaryOperator.identity;
 
 public class ElasticsearchMetadata
         implements ConnectorMetadata
@@ -122,7 +113,8 @@ public class ElasticsearchMetadata
                     PASSTHROUGH_QUERY_RESULT_COLUMN_NAME,
                     VARCHAR,
                     new VarcharDecoder.Descriptor(PASSTHROUGH_QUERY_RESULT_COLUMN_NAME),
-                    false));
+                    ColumnPredicateSupport.createFromBoolean(false),
+                    ImmutableList.of()));
 
     // See https://www.elastic.co/guide/en/elasticsearch/reference/current/regexp-syntax.html
     private static final Set<Integer> REGEXP_RESERVED_CHARACTERS = IntStream.of('.', '?', '+', '*', '|', '{', '}', '[', ']', '(', ')', '"', '#', '@', '&', '<', '>', '~')
@@ -242,33 +234,11 @@ public class ElasticsearchMetadata
                     field.getName(),
                     converted.getType(),
                     converted.getDecoderDescriptor(),
-                    supportsPredicates(field.getType())));
+                    ColumnPredicateSupport.createFromElasticsearchType(field.getType()),
+                    ImmutableList.of()));
         }
 
         return result.buildOrThrow();
-    }
-
-    private static boolean supportsPredicates(IndexMetadata.Type type)
-    {
-        if (type instanceof DateTimeType) {
-            return true;
-        }
-
-        if (type instanceof PrimitiveType) {
-            switch (((PrimitiveType) type).getName().toLowerCase(ENGLISH)) {
-                case "boolean":
-                case "byte":
-                case "short":
-                case "integer":
-                case "long":
-                case "double":
-                case "float":
-                case "keyword":
-                    return true;
-            }
-        }
-
-        return false;
     }
 
     private TypeAndDecoder toTrino(IndexMetadata.Field field)
@@ -416,7 +386,7 @@ public class ElasticsearchMetadata
             throw new IllegalArgumentException(format("Unexpected column for table '%s$query': %s", table.getIndex(), column.getName()));
         }
 
-        return BuiltinColumns.of(column.getName())
+        return BuiltinColumns.of(column.getQualifiedName())
                 .map(BuiltinColumns::getMetadata)
                 .orElse(ColumnMetadata.builder()
                         .setName(column.getName())
@@ -481,14 +451,182 @@ public class ElasticsearchMetadata
                 handle.getConstraint(),
                 handle.getRegexes(),
                 handle.getQuery(),
-                OptionalLong.of(limit));
+                OptionalLong.of(limit),
+                ImmutableSet.of());
 
         return Optional.of(new LimitApplicationResult<>(handle, false, false));
     }
 
     @Override
-    public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle table, Constraint constraint)
-    {
+    public Optional<ProjectionApplicationResult<ConnectorTableHandle>> applyProjection(
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            List<ConnectorExpression> projections,
+            Map<String, ColumnHandle> assignments) {
+        ElasticsearchTableHandle handle = (ElasticsearchTableHandle) table;
+
+        if (isPassthroughQuery(handle)) {
+            return Optional.empty();
+        }
+
+        Set<ConnectorExpression> projectedExpressions = projections.stream()
+                .map(ApplyProjectionUtil::extractSupportedProjectedColumns)
+                .flatMap(List::stream)
+                .collect(toImmutableSet());
+
+        Map<ConnectorExpression, ApplyProjectionUtil.ProjectedColumnRepresentation> columnProjections = projectedExpressions.stream()
+                .collect(toImmutableMap(identity(), ApplyProjectionUtil::createProjectedColumnRepresentation));
+
+        if (columnProjections.values().stream().allMatch(ApplyProjectionUtil.ProjectedColumnRepresentation::isVariable)) {
+
+            Set<ElasticsearchColumnHandle> projectedColumns = assignments.values().stream().map(ElasticsearchColumnHandle.class::cast).collect(toImmutableSet());
+
+            if (handle.getProjectedColumns().equals(projectedColumns)) {
+                return Optional.empty();
+            }
+
+            List<Assignment> assignmentsList = assignments.entrySet().stream()
+                    .map(assignment -> new Assignment(
+                            assignment.getKey(),
+                            assignment.getValue(),
+                            ((ElasticsearchColumnHandle) assignment.getValue()).getType()))
+                    .collect(toImmutableList());
+
+            return Optional.of(new ProjectionApplicationResult<>(
+                    handle.withProjectedColumns(projectedColumns),
+                    projections,
+                    assignmentsList,
+                    false));
+        }
+
+        Map<String, Assignment> newAssignments = new HashMap<>();
+        ImmutableMap.Builder<ConnectorExpression, Variable> newVariablesBuilder = ImmutableMap.builder();
+        ImmutableSet.Builder<ElasticsearchColumnHandle> projectedColumnsBuilder = ImmutableSet.builder();
+
+        for (Map.Entry<ConnectorExpression, ApplyProjectionUtil.ProjectedColumnRepresentation> entry : columnProjections.entrySet()) {
+            ConnectorExpression expression = entry.getKey();
+            ApplyProjectionUtil.ProjectedColumnRepresentation projectedColumnRepresentation = entry.getValue();
+
+            ElasticsearchColumnHandle projectedColumnHandle = getDereferencedColumnHandle(projectedColumnRepresentation, assignments);
+            Assignment assignment = new Assignment(projectedColumnHandle.getQualifiedName(), projectedColumnHandle, projectedColumnHandle.getType());
+            newAssignments.putIfAbsent(projectedColumnHandle.getQualifiedName(), assignment);
+
+            Variable projectedColumnVariable = new Variable(projectedColumnHandle.getQualifiedName(), expression.getType());
+            newVariablesBuilder.put(expression, projectedColumnVariable);
+            projectedColumnsBuilder.add(projectedColumnHandle);
+        }
+
+        Map<ConnectorExpression, Variable> newVariables = newVariablesBuilder.buildOrThrow();
+        List<ConnectorExpression> newProjections = projections.stream()
+                .map(expression -> ApplyProjectionUtil.replaceWithNewVariables(expression, newVariables))
+                .collect(toImmutableList());
+
+        List<Assignment> outputAssignments = newAssignments.values().stream().collect(toImmutableList());
+        return Optional.of(new ProjectionApplicationResult<>(
+                handle.withProjectedColumns(projectedColumnsBuilder.build()),
+                newProjections,
+                outputAssignments,
+                false));
+    }
+
+    private ElasticsearchColumnHandle getDereferencedColumnHandle(ApplyProjectionUtil.ProjectedColumnRepresentation projectedColumnRepresentation, Map<String, ColumnHandle> assignments) {
+        List<String> fieldNames = traverseFieldNames(projectedColumnRepresentation);
+        ElasticsearchColumnHandle columnHandle = (ElasticsearchColumnHandle) assignments.get(projectedColumnRepresentation.getVariable().getName());
+        DecoderDescriptor descriptor = getProjectedDescriptor(projectedColumnRepresentation, columnHandle);
+        Type type = getProjectedType(projectedColumnRepresentation, columnHandle);
+        ColumnPredicateSupport predicateSupport = getProjectedPredicateSupport(columnHandle.getColumnPredicateSupport(), fieldNames);
+
+        return new ElasticsearchColumnHandle(
+                columnHandle.getName(),
+                type,
+                descriptor,
+                predicateSupport,
+                ImmutableList.copyOf(fieldNames)
+        );
+//        return columnHandle;
+    }
+
+    private ColumnPredicateSupport getProjectedPredicateSupport(ColumnPredicateSupport predicateSupport, List<String> fieldNames) {
+        for (int i = 0; i < fieldNames.size(); i++) {
+            String fieldName = fieldNames.get(i);
+            predicateSupport = predicateSupport.getChildren().get(fieldName);
+        }
+        return predicateSupport;
+    }
+
+    private Type getProjectedType(ApplyProjectionUtil.ProjectedColumnRepresentation projectedColumnRepresentation, ElasticsearchColumnHandle columnHandle) {
+        if (!(columnHandle.getType() instanceof RowType)) {
+            return columnHandle.getType();
+        }
+        RowType type = (RowType) columnHandle.getType();
+        for (int i = 0; i < projectedColumnRepresentation.getDereferenceIndices().size(); i++) {
+            Type foundType = type.getFields().get(projectedColumnRepresentation.getDereferenceIndices().get(i)).getType();
+            if (foundType instanceof RowType rowType) {
+                type = rowType;
+            } else {
+                return foundType;
+            }
+        }
+        return type;
+    }
+
+    private DecoderDescriptor getProjectedDescriptor(ApplyProjectionUtil.ProjectedColumnRepresentation projectedColumnRepresentation, ElasticsearchColumnHandle columnHandle) {
+        if (!(columnHandle.getDecoderDescriptor() instanceof RowDecoder.Descriptor)) {
+            return columnHandle.getDecoderDescriptor();
+        }
+        RowDecoder.Descriptor decoderDescriptor = (RowDecoder.Descriptor) columnHandle.getDecoderDescriptor();
+        for (int i = 0; i < projectedColumnRepresentation.getDereferenceIndices().size(); i++) {
+            DecoderDescriptor descriptor = decoderDescriptor.getFields().get(projectedColumnRepresentation.getDereferenceIndices().get(i)).getDescriptor();
+            if (descriptor instanceof RowDecoder.Descriptor rowDescriptor) {
+                decoderDescriptor = rowDescriptor;
+            } else {
+                return descriptor;
+            }
+        }
+        return decoderDescriptor;
+    }
+
+    private List<String> traverseFieldNames(ApplyProjectionUtil.ProjectedColumnRepresentation projectedColumnRepresentation) {
+        List<String> fieldNames = new ArrayList<>();
+
+        Type type = projectedColumnRepresentation.getVariable().getType();
+        for (int index : projectedColumnRepresentation.getDereferenceIndices()) {
+            checkArgument(type instanceof RowType, "type should be Row type");
+            RowType rowType = (RowType) type;
+            RowType.Field field = rowType.getFields().get(index);
+            fieldNames.add(field.getName().orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "ROW type does not have field names declared: " + rowType)));
+            type = field.getType();
+        }
+
+        return fieldNames;
+    }
+
+    public List<ConnectorExpression> extractSupportedProjectedColumns(ConnectorExpression expression) {
+        requireNonNull(expression, "expression is null");
+        ImmutableList.Builder<ConnectorExpression> supportedSubExpressions = ImmutableList.builder();
+        fillSupportedProjectedColumns(expression, supportedSubExpressions);
+        return supportedSubExpressions.build();
+    }
+
+    private void fillSupportedProjectedColumns(ConnectorExpression expression, ImmutableList.Builder<ConnectorExpression> supportedSubExpressions) {
+        if (isPushDownSupported(expression)) {
+            supportedSubExpressions.add(expression);
+            return;
+        }
+
+        // If the whole expression is not supported, look for a partially supported projection
+        for (ConnectorExpression child : expression.getChildren()) {
+            fillSupportedProjectedColumns(child, supportedSubExpressions);
+        }
+    }
+
+    private boolean isPushDownSupported(ConnectorExpression expression) {
+        return expression instanceof Variable; //||
+//                (expression instanceof FieldDereference fieldDereference && isPushDownSupported(fieldDereference.getTarget()));
+    }
+
+    @Override
+    public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle table, Constraint constraint) {
         ElasticsearchTableHandle handle = (ElasticsearchTableHandle) table;
 
         if (isPassthroughQuery(handle)) {
@@ -502,7 +640,7 @@ public class ElasticsearchMetadata
         for (Map.Entry<ColumnHandle, Domain> entry : domains.entrySet()) {
             ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) entry.getKey();
 
-            if (column.isSupportsPredicates()) {
+            if (column.getColumnPredicateSupport().isSupportsPredicates()) {
                 supported.put(column, entry.getValue());
             }
             else {
@@ -524,7 +662,7 @@ public class ElasticsearchMetadata
                     String variableName = ((Variable) arguments.get(0)).getName();
                     ElasticsearchColumnHandle column = (ElasticsearchColumnHandle) constraint.getAssignments().get(variableName);
                     verifyNotNull(column, "No assignment for %s", variableName);
-                    String columnName = column.getName();
+                    String columnName = column.getQualifiedName();
                     Object pattern = ((Constant) arguments.get(1)).getValue();
                     Optional<Slice> escape = Optional.empty();
                     if (arguments.size() == 3) {
@@ -557,7 +695,8 @@ public class ElasticsearchMetadata
                 newDomain,
                 newRegexes,
                 handle.getQuery(),
-                handle.getLimit());
+                handle.getLimit(),
+                ImmutableSet.of());
 
         return Optional.of(new ConstraintApplicationResult<>(handle, TupleDomain.withColumnDomains(unsupported), newExpression, false));
     }

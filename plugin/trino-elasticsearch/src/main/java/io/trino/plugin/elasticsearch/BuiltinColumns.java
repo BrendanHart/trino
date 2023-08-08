@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.elasticsearch;
 
+import com.google.common.collect.ImmutableList;
 import io.trino.plugin.elasticsearch.decoders.IdColumnDecoder;
 import io.trino.plugin.elasticsearch.decoders.ScoreColumnDecoder;
 import io.trino.plugin.elasticsearch.decoders.SourceColumnDecoder;
@@ -31,9 +32,9 @@ import static java.util.function.Function.identity;
 
 enum BuiltinColumns
 {
-    ID("_id", VARCHAR, new IdColumnDecoder.Descriptor(), true),
-    SOURCE("_source", VARCHAR, new SourceColumnDecoder.Descriptor(), false),
-    SCORE("_score", REAL, new ScoreColumnDecoder.Descriptor(), false);
+    ID("_id", VARCHAR, new IdColumnDecoder.Descriptor(), ColumnPredicateSupport.createFromBoolean(true)),
+    SOURCE("_source", VARCHAR, new SourceColumnDecoder.Descriptor(), ColumnPredicateSupport.createFromBoolean(false)),
+    SCORE("_score", REAL, new ScoreColumnDecoder.Descriptor(), ColumnPredicateSupport.createFromBoolean(false));
 
     private static final Map<String, BuiltinColumns> COLUMNS_BY_NAME = stream(values())
             .collect(toImmutableMap(BuiltinColumns::getName, identity()));
@@ -41,14 +42,14 @@ enum BuiltinColumns
     private final String name;
     private final Type type;
     private final DecoderDescriptor decoderDescriptor;
-    private final boolean supportsPredicates;
+    private final ColumnPredicateSupport columnPredicateSupport;
 
-    BuiltinColumns(String name, Type type, DecoderDescriptor decoderDescriptor, boolean supportsPredicates)
+    BuiltinColumns(String name, Type type, DecoderDescriptor decoderDescriptor, ColumnPredicateSupport columnPredicateSupport)
     {
         this.name = name;
         this.type = type;
         this.decoderDescriptor = decoderDescriptor;
-        this.supportsPredicates = supportsPredicates;
+        this.columnPredicateSupport = columnPredicateSupport;
     }
 
     public static Optional<BuiltinColumns> of(String name)
@@ -86,6 +87,7 @@ enum BuiltinColumns
                 name,
                 type,
                 decoderDescriptor,
-                supportsPredicates);
+                columnPredicateSupport,
+                ImmutableList.of());
     }
 }

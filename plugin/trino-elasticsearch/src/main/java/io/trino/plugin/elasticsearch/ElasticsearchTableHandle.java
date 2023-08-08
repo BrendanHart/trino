@@ -16,14 +16,12 @@ package io.trino.plugin.elasticsearch;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.predicate.TupleDomain;
 
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.OptionalLong;
+import java.util.*;
 import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
@@ -43,6 +41,7 @@ public final class ElasticsearchTableHandle
     private final Map<String, String> regexes;
     private final Optional<String> query;
     private final OptionalLong limit;
+    private final Set<ElasticsearchColumnHandle> projectedColumns;
 
     public ElasticsearchTableHandle(Type type, String schema, String index, Optional<String> query)
     {
@@ -54,6 +53,7 @@ public final class ElasticsearchTableHandle
         constraint = TupleDomain.all();
         regexes = ImmutableMap.of();
         limit = OptionalLong.empty();
+        projectedColumns = ImmutableSet.of();
     }
 
     @JsonCreator
@@ -64,7 +64,8 @@ public final class ElasticsearchTableHandle
             @JsonProperty("constraint") TupleDomain<ColumnHandle> constraint,
             @JsonProperty("regexes") Map<String, String> regexes,
             @JsonProperty("query") Optional<String> query,
-            @JsonProperty("limit") OptionalLong limit)
+            @JsonProperty("limit") OptionalLong limit,
+            @JsonProperty("projectedColumns") Set<ElasticsearchColumnHandle> projectedColumns)
     {
         this.type = requireNonNull(type, "type is null");
         this.schema = requireNonNull(schema, "schema is null");
@@ -73,6 +74,20 @@ public final class ElasticsearchTableHandle
         this.regexes = ImmutableMap.copyOf(requireNonNull(regexes, "regexes is null"));
         this.query = requireNonNull(query, "query is null");
         this.limit = requireNonNull(limit, "limit is null");
+        this.projectedColumns = requireNonNull(projectedColumns, "projectedColumns is null");
+    }
+
+    public ElasticsearchTableHandle withProjectedColumns(Set<ElasticsearchColumnHandle> projectedColumns) {
+        return new ElasticsearchTableHandle(
+                type,
+                schema,
+                index,
+                constraint,
+                regexes,
+                query,
+                limit,
+                projectedColumns
+        );
     }
 
     @JsonProperty
@@ -117,6 +132,11 @@ public final class ElasticsearchTableHandle
         return query;
     }
 
+    @JsonProperty
+    public Set<ElasticsearchColumnHandle> getProjectedColumns() {
+        return projectedColumns;
+    }
+
     @Override
     public boolean equals(Object o)
     {
@@ -133,13 +153,14 @@ public final class ElasticsearchTableHandle
                 constraint.equals(that.constraint) &&
                 regexes.equals(that.regexes) &&
                 query.equals(that.query) &&
-                limit.equals(that.limit);
+                limit.equals(that.limit) &&
+                projectedColumns.equals(that.projectedColumns);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(type, schema, index, constraint, regexes, query, limit);
+        return Objects.hash(type, schema, index, constraint, regexes, query, limit, projectedColumns);
     }
 
     @Override

@@ -66,6 +66,11 @@ public class RowDecoder
         }
     }
 
+    public List<Decoder> getDecoders()
+    {
+        return this.decoders;
+    }
+
     public static class Descriptor
             implements DecoderDescriptor
     {

@@ -18,6 +18,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.type.Type;
 
+import java.util.List;
 import java.util.Objects;
 
 import static java.util.Objects.requireNonNull;
@@ -28,19 +29,38 @@ public final class ElasticsearchColumnHandle
     private final String name;
     private final Type type;
     private final DecoderDescriptor decoderDescriptor;
-    private final boolean supportsPredicates;
+    private final ColumnPredicateSupport columnPredicateSupport;
+    private final List<String> dereferenceNames;
+    private final String qualifiedName;
 
     @JsonCreator
     public ElasticsearchColumnHandle(
             @JsonProperty("name") String name,
             @JsonProperty("type") Type type,
             @JsonProperty("decoderDescriptor") DecoderDescriptor decoderDescriptor,
-            @JsonProperty("supportsPredicates") boolean supportsPredicates)
+            @JsonProperty("columnPredicateSupport") ColumnPredicateSupport columnPredicateSupport,
+            @JsonProperty("dereferenceNames") List<String> dereferenceNames)
     {
         this.name = requireNonNull(name, "name is null");
         this.type = requireNonNull(type, "type is null");
         this.decoderDescriptor = requireNonNull(decoderDescriptor, "decoderDescriptor is null");
-        this.supportsPredicates = supportsPredicates;
+        this.columnPredicateSupport = columnPredicateSupport;
+        this.dereferenceNames = requireNonNull(dereferenceNames, "dereferenceNames is null");
+        this.qualifiedName = buildQualifiedName();
+    }
+
+    private String buildQualifiedName() {
+        StringBuilder builder = new StringBuilder();
+        builder.append(this.name);
+        if (dereferenceNames.size() > 0) {
+            builder.append(".");
+            builder.append(String.join(".", this.dereferenceNames));
+        }
+        return builder.toString();
+    }
+
+    public String getQualifiedName() {
+        return this.qualifiedName;
     }
 
     @JsonProperty
@@ -62,15 +82,20 @@ public final class ElasticsearchColumnHandle
     }
 
     @JsonProperty
-    public boolean isSupportsPredicates()
+    public ColumnPredicateSupport getColumnPredicateSupport()
     {
-        return supportsPredicates;
+        return columnPredicateSupport;
+    }
+
+    @JsonProperty
+    public List<String> getDereferenceNames() {
+        return dereferenceNames;
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(name, type, decoderDescriptor, supportsPredicates);
+        return Objects.hash(name, type, decoderDescriptor, columnPredicateSupport, dereferenceNames);
     }
 
     @Override
@@ -84,15 +109,16 @@ public final class ElasticsearchColumnHandle
         }
 
         ElasticsearchColumnHandle other = (ElasticsearchColumnHandle) obj;
-        return this.supportsPredicates == other.supportsPredicates &&
+        return Objects.equals(this.getColumnPredicateSupport(), other.getColumnPredicateSupport()) &&
                 Objects.equals(this.getName(), other.getName()) &&
                 Objects.equals(this.getType(), other.getType()) &&
-                Objects.equals(this.getDecoderDescriptor(), other.getDecoderDescriptor());
+                Objects.equals(this.getDecoderDescriptor(), other.getDecoderDescriptor()) &&
+                Objects.equals(this.getDereferenceNames(), other.getDereferenceNames());
     }
 
     @Override
     public String toString()
     {
-        return getName() + "::" + getType();
+        return getQualifiedName() + "::" + getType();
     }
 }

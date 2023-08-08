@@ -77,7 +77,7 @@ public class ScanQueryPageSource
 
         // When the _source field is requested, we need to bypass column pruning when fetching the document
         boolean needAllFields = columns.stream()
-                .map(ElasticsearchColumnHandle::getName)
+                .map(ElasticsearchColumnHandle::getQualifiedName)
                 .anyMatch(isEqual(SOURCE.getName()));
 
         // Columns to fetch as doc_fields instead of pulling them out of the JSON source
@@ -94,7 +94,7 @@ public class ScanQueryPageSource
                 .toArray(BlockBuilder[]::new);
 
         List<String> requiredFields = columns.stream()
-                .map(ElasticsearchColumnHandle::getName)
+                .map(ElasticsearchColumnHandle::getQualifiedName)
                 .filter(name -> !isBuiltinColumn(name))
                 .collect(toList());
 
@@ -159,8 +159,8 @@ public class ScanQueryPageSource
             Map<String, Object> document = hit.getSourceAsMap();
 
             for (int i = 0; i < decoders.size(); i++) {
-                String field = columns.get(i).getName();
-                decoders.get(i).decode(hit, () -> getField(document, field), columnBuilders[i]);
+                ElasticsearchColumnHandle column = columns.get(i);
+                decoders.get(i).decode(hit, () -> getDereferenceField(document, column), columnBuilders[i]);
             }
 
             if (hit.getSourceRef() != null) {
@@ -179,6 +179,18 @@ public class ScanQueryPageSource
         }
 
         return new Page(blocks);
+    }
+
+    public static Object getDereferenceField(Map<String, Object> document, ElasticsearchColumnHandle column)
+    {
+        Object current = document.get(column.getName());
+        if (current == null) {
+            return document.get(column.getQualifiedName());
+        }
+        for (int i = 0; i < column.getDereferenceNames().size(); i++) {
+            current = ((Map<String, Object>)current).get(column.getDereferenceNames().get(i));
+        }
+        return current;
     }
 
     public static Object getField(Map<String, Object> document, String field)
@@ -207,7 +219,7 @@ public class ScanQueryPageSource
         Map<String, Type> result = new HashMap<>();
 
         for (ElasticsearchColumnHandle column : columns) {
-            flattenFields(result, column.getName(), column.getType());
+            flattenFields(result, column.getQualifiedName(), column.getType());
         }
 
         return result;
