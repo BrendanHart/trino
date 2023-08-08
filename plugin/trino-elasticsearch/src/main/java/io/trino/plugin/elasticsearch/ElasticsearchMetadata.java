@@ -601,30 +601,6 @@ public class ElasticsearchMetadata
         return fieldNames;
     }
 
-    public List<ConnectorExpression> extractSupportedProjectedColumns(ConnectorExpression expression) {
-        requireNonNull(expression, "expression is null");
-        ImmutableList.Builder<ConnectorExpression> supportedSubExpressions = ImmutableList.builder();
-        fillSupportedProjectedColumns(expression, supportedSubExpressions);
-        return supportedSubExpressions.build();
-    }
-
-    private void fillSupportedProjectedColumns(ConnectorExpression expression, ImmutableList.Builder<ConnectorExpression> supportedSubExpressions) {
-        if (isPushDownSupported(expression)) {
-            supportedSubExpressions.add(expression);
-            return;
-        }
-
-        // If the whole expression is not supported, look for a partially supported projection
-        for (ConnectorExpression child : expression.getChildren()) {
-            fillSupportedProjectedColumns(child, supportedSubExpressions);
-        }
-    }
-
-    private boolean isPushDownSupported(ConnectorExpression expression) {
-        return expression instanceof Variable; //||
-//                (expression instanceof FieldDereference fieldDereference && isPushDownSupported(fieldDereference.getTarget()));
-    }
-
     @Override
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle table, Constraint constraint) {
         ElasticsearchTableHandle handle = (ElasticsearchTableHandle) table;
@@ -696,7 +672,7 @@ public class ElasticsearchMetadata
                 newRegexes,
                 handle.getQuery(),
                 handle.getLimit(),
-                ImmutableSet.of());
+                handle.getProjectedColumns());
 
         return Optional.of(new ConstraintApplicationResult<>(handle, TupleDomain.withColumnDomains(unsupported), newExpression, false));
     }
